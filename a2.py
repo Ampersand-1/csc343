@@ -20,7 +20,7 @@ Copyright (c) 2023 Danny Heap and Jacqueline Smith
 This file contains the WasteWrangler class and some simple testing functions.
 
 Group Members:
-Shilei (Andy) Zhao, #1006967491
+Shilei (Andy) Zhao, #1006867491
 Lujie (Adam) Zhao, #1006879086
 """
 
