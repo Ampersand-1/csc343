@@ -18,6 +18,10 @@ Copyright (c) 2023 Danny Heap and Jacqueline Smith
 === Module Description ===
 
 This file contains the WasteWrangler class and some simple testing functions.
+
+Group Members:
+Shilei (Andy) Zhao, #1006967491
+Lujie (Adam) Zhao, #1006879086
 """
 
 import datetime as dt
