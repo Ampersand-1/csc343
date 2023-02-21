@@ -24,6 +24,10 @@ Shilei (Andy) Zhao, #1006867491
 Lujie (Adam) Zhao, #1006879086
 """
 
+# Andy - ODD
+# Adam - EVEN
+# (according to the a2.pdf handout in the function definition)
+
 import datetime as dt
 import psycopg2 as pg
 import psycopg2.extensions as pg_ext
