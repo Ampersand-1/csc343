@@ -189,130 +189,138 @@ class WasteWrangler:
         While a realistic use case will provide a <time> in the near future, our
         tests could use any valid value for <time>.
         """
-        # try:
         cur = self.connection.cursor()
-        
-        # obtaining desired wasteType for the route
-        r_wasteType = ""
-        cur.execute(f'select wastetype from Route where rid={rid};')
-        for row in cur:
-            r_wasteType = row[0]
-        # print(r_wasteType)
-    
-        
-        r_drivers = {} # {<eid>: <hiredate>}
-        r_trucks = {} # {<tid>: <capacity>}
+        cur.execute('begin;')
+        cur.execute('savepoint sp_schedule_trip;')
 
-        # filters out employees that are not drivers
-        cur.execute(f'select distinct eid, hiredate from driver natural join employee;')
-        for row in cur:
-            r_drivers[row[0]] = row[1]
+        try:
+            # obtaining desired wasteType for the route
+            r_wasteType = ""
+            cur.execute(f'select wastetype from Route where rid={rid};')
+            for row in cur:
+                r_wasteType = row[0]
+            # print(r_wasteType)
+        
             
-        # filters out trucks that cannot handle r_wasteType and trucks scheduled for a maintenance on the same day
-        cur.execute(f'select tid, capacity from truck natural join trucktype natural join maintenance where mdate<>\'{time.date()}\' and wastetype=\'{r_wasteType}\';')
-        for row in cur:
-            r_trucks[row[0]] = int(row[1])
+            r_drivers = {} # {<eid>: <hiredate>}
+            r_trucks = {} # {<tid>: <capacity>}
 
-        # print(r_drivers)
-        # print(r_trucks)
-
-
-        # Trying to filter out any trucks OR drivers that are busy (i.e. scheduled on a trip during the same time as the given time)
-        # filters out trucks that are scheduled for maintenance on the same day, matched with their routes, and filters invalid rID's
-        cur.execute('select t.tid, eid1, eid2, ttime, length, t.rid from trip t, maintenance m, Route r where t.tid=m.tid and date(ttime)<>mdate and t.rid=r.rid;')
-        # print(f"given time: {time}\n")
-        
-        for row in cur:
-            tid = row[0]
-            eid1 = row[1]
-            eid2 = row[2]
-            truck_time = row[3]
-            length = row[4]
-            rid_prime = row[5]
-            # print(f"truck_time: {truck_time}")
-            
-            # if a trip has already been scheduled for this rid on the same day
-            if (rid == rid_prime and time.date() == truck_time.date()):
-                return False
-        
-            if (not valid_truck_time(truck_time, time, length)):
-                # invalid time, removing invalid drivers and trucks
-                r_drivers.pop(eid1, None)
-                r_drivers.pop(eid2, None)
-                r_trucks.pop(tid, None)
+            # filters out employees that are not drivers
+            cur.execute(f'select distinct eid, hiredate from driver natural join employee;')
+            for row in cur:
+                r_drivers[row[0]] = row[1]
                 
+            # filters out trucks that cannot handle r_wasteType and trucks scheduled for a maintenance on the same day
+            cur.execute(f'select tid, capacity from truck natural join trucktype natural join maintenance where mdate<>\'{time.date()}\' and wastetype=\'{r_wasteType}\';')
+            for row in cur:
+                r_trucks[row[0]] = int(row[1])
 
-            # print()
-    
-        # print(r_drivers)
-        # print(r_trucks)
-        # print("\n\n")
-        
-        # if no suitable drivers or trucks
-        if (len(r_drivers) < 2 or len(r_trucks) == 0):
-            return False
-        
-        # picking a facility with matching r_wastetype
-        final_facility = -1
-        cur.execute(f'select fid from facility where wastetype=\'{r_wasteType}\';')
-        for row in cur:
-            final_facility = row[0]
-            break
-        if (final_facility == -1): # edge case: if no suitable facility
-            return False
-        
-        
-        final_eid1 = -1
-        final_eid2 = -1
-        at_least_one_wasteType = False
-        oldest = dt.datetime(9999, 12, 31) # initialzie to date 9999-12-31
-        
-        # for eid1 - always the oldest hire date
-        final_eid1 = min(r_drivers, key=lambda k: r_drivers[k])
-        del r_drivers[final_eid1]
-        
-        # check if this employee can drive the wasteType
-        cur.execute(f'select exists (select * from driver natural join trucktype where eid={final_eid1} and wastetype=\'{r_wasteType}\');')
-        for row in cur:
-            if (row[0] == True):
-                at_least_one_wasteType = True
+            # print(r_drivers)
+            # print(r_trucks)
 
-        if (at_least_one_wasteType):
-            # eid2 just has to be second oldest 
-            final_eid2 = min(r_drivers, key=lambda k: r_drivers[k]) 
-        else:
-            # eid2 has to be the oldest driver that matches the wasteType
-            sorted_drivers = sorted(r_drivers, key=lambda k: r_drivers[k]) # sort the dict into a list based on hiredate 
-            for i in sorted_drivers:
-                cur.execute(f'select exists (select * from driver natural join trucktype where eid={i} and wastetype=\'{r_wasteType}\');')
-                for row in cur:
-                    if (row[0] == True):
-                        final_eid2 = i
-                if (final_eid2 != -1):
-                    break
-        
 
-        final_tid = -1
-        final_cap = -1
-        for key, value in r_trucks.items(): # sort by capacity {<tid>: <capacity>}
-            if (value == final_cap): # edge case: prioritize smaller tid #
-                final_tid = min(final_tid, key)
-            elif (value > final_cap):
-                final_cap = value
-                final_tid = key
-
+            # Trying to filter out any trucks OR drivers that are busy (i.e. scheduled on a trip during the same time as the given time)
+            # filters out trucks that are scheduled for maintenance on the same day, matched with their routes, and filters invalid rID's
+            cur.execute('select t.tid, eid1, eid2, ttime, length, t.rid from trip t, maintenance m, Route r where t.tid=m.tid and date(ttime)<>mdate and t.rid=r.rid;')
+            # print(f"given time: {time}\n")
             
-        cur.execute(f'insert into Trip values ({rid}, {final_tid}, \'{time}\', NULL, {final_eid1}, {final_eid2}, {final_facility});')    
-        return True
-        
-        cur.close()
+            for row in cur:
+                tid = row[0]
+                eid1 = row[1]
+                eid2 = row[2]
+                truck_time = row[3]
+                length = row[4]
+                rid_prime = row[5]
+                # print(f"truck_time: {truck_time}")
+                
+                # if a trip has already been scheduled for this rid on the same day
+                if (rid == rid_prime and time.date() == truck_time.date()):
+                    return False
             
-        # except pg.Error as ex:
+                # print(f"truck time: {truck_time}, given_time: {time}")
+                if (not valid_truck_time(truck_time, time, length)):
+                    # invalid time, removing invalid drivers and trucks
+                    r_drivers.pop(eid1, None)
+                    r_drivers.pop(eid2, None)
+                    r_trucks.pop(tid, None)
+                    
+
+                # print()
+        
+            # print(r_drivers)
+            # print(r_trucks)
+            # print("\n\n")
+            
+            # if no suitable drivers or trucks
+            if (len(r_drivers) < 2 or len(r_trucks) == 0):
+                return False
+            
+            # picking a facility with matching r_wastetype
+            final_facility = -1
+            cur.execute(f'select fid from facility where wastetype=\'{r_wasteType}\';')
+            for row in cur:
+                final_facility = row[0]
+                break
+            if (final_facility == -1): # edge case: if no suitable facility
+                return False
+            
+            
+            final_eid1 = -1
+            final_eid2 = -1
+            at_least_one_wasteType = False
+            oldest = dt.datetime(9999, 12, 31) # initialzie to date 9999-12-31
+            
+            # for eid1 - always the oldest hire date
+            final_eid1 = min(r_drivers, key=lambda k: r_drivers[k])
+            del r_drivers[final_eid1]
+            
+            # check if this employee can drive the wasteType
+            cur.execute(f'select exists (select * from driver natural join trucktype where eid={final_eid1} and wastetype=\'{r_wasteType}\');')
+            for row in cur:
+                if (row[0] == True):
+                    at_least_one_wasteType = True
+
+            if (at_least_one_wasteType):
+                # eid2 just has to be second oldest 
+                final_eid2 = min(r_drivers, key=lambda k: r_drivers[k]) 
+            else:
+                # eid2 has to be the oldest driver that matches the wasteType
+                sorted_drivers = sorted(r_drivers, key=lambda k: r_drivers[k]) # sort the dict into a list based on hiredate 
+                for i in sorted_drivers:
+                    cur.execute(f'select exists (select * from driver natural join trucktype where eid={i} and wastetype=\'{r_wasteType}\');')
+                    for row in cur:
+                        if (row[0] == True):
+                            final_eid2 = i
+                    if (final_eid2 != -1):
+                        break
+            
+
+            final_tid = -1
+            final_cap = -1
+            for key, value in r_trucks.items(): # sort by capacity {<tid>: <capacity>}
+                if (value == final_cap): # edge case: prioritize smaller tid #
+                    final_tid = min(final_tid, key)
+                elif (value > final_cap):
+                    final_cap = value
+                    final_tid = key
+
+                
+            cur.execute(f'insert into Trip values ({rid}, {final_tid}, \'{time}\', NULL, {final_eid1}, {final_eid2}, {final_facility});')    
+            cur.execute('commit;')
+
+            cur.close()
+            return True
+            
+        except pg.Error as ex:
             # You may find it helpful to uncomment this line while debugging,
             # as it will show you all the details of the error that occurred:
-            # raise ex
+            cur.execute('rollback to sp_schedule_trip;')
+            cur.close()
+            raise ex
             # pass
             # return False
+        
+            
 
     def schedule_trips(self, tid: int, date: dt.date) -> int:
         """Schedule the truck identified with <tid> for trips on <date> using
