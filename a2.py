@@ -35,6 +35,51 @@ import psycopg2.extras as pg_extras
 from typing import Optional, TextIO
 
 
+# helper functions
+
+# function that takes in two dt.date variables
+# Returns true if the dates are on different days
+# checks if the first date starts 30 minutes before the second date or 
+# ends 30 minutes after the second date
+# returns true if this is not the case, false otherwise
+# also checks if time is within working hours (8am - 4pm)
+def valid_truck_time(truck_time: dt.datetime, given_time: dt.datetime, length: int) -> bool:
+    # print("in valid_truck_time()")
+    
+    if (given_time.date() != truck_time.date()): # on different days
+        return True
+    
+    if (given_time.time() < dt.time(8, 0)): # if the given_time starts before 8am (too early for workday)
+        return False
+    
+    else: # truck_time is on the same day as given_time
+        time_diff = 0
+
+        if (given_time.time() > truck_time.time()): # if truck_time is before given_time
+            time_diff = given_time - truck_time
+
+            if (time_diff.total_seconds() <= 1800): # this is a INVALID time (1800s = 30min)
+                return False
+
+        else: # if truck_time is after given_time
+            route_time = length / 5 # [in hours] (assume all truck speeds = 5km/h)
+            end_time = given_time + dt.timedelta(hours=int(route_time))
+            
+            if (end_time.time() > dt.time(16, 0)): # if the end_time goes after 16:00 (too late for workday)
+                return False
+            
+            if (end_time.time() < truck_time.time()): # if ending time of the delivery is BEFORE the truck_time
+                time_diff = truck_time - end_time
+                
+                if (time_diff.total_seconds() <= 1800): # if truck_time is within 30 min after delivery is finished
+                    return False
+                
+            else: # if ending time of the delivery is AFTER the truck_time
+                return False
+
+        return True
+
+
 class WasteWrangler:
     """A class that can work with data conforming to the schema in
     waste_wrangler_schema.ddl.
@@ -144,14 +189,130 @@ class WasteWrangler:
         While a realistic use case will provide a <time> in the near future, our
         tests could use any valid value for <time>.
         """
-        try:
-            # TODO: implement this method
-            pass
-        except pg.Error as ex:
+        # try:
+        cur = self.connection.cursor()
+        
+        # obtaining desired wasteType for the route
+        r_wasteType = ""
+        cur.execute(f'select wastetype from Route where rid={rid};')
+        for row in cur:
+            r_wasteType = row[0]
+        # print(r_wasteType)
+    
+        
+        r_drivers = {} # {<eid>: <hiredate>}
+        r_trucks = {} # {<tid>: <capacity>}
+
+        # filters out employees that are not drivers
+        cur.execute(f'select distinct eid, hiredate from driver natural join employee;')
+        for row in cur:
+            r_drivers[row[0]] = row[1]
+            
+        # filters out trucks that cannot handle r_wasteType and trucks scheduled for a maintenance on the same day
+        cur.execute(f'select tid, capacity from truck natural join trucktype natural join maintenance where mdate<>\'{time.date()}\' and wastetype=\'{r_wasteType}\';')
+        for row in cur:
+            r_trucks[row[0]] = int(row[1])
+
+        # print(r_drivers)
+        # print(r_trucks)
+
+
+        # Trying to filter out any trucks OR drivers that are busy (i.e. scheduled on a trip during the same time as the given time)
+        # filters out trucks that are scheduled for maintenance on the same day, matched with their routes, and filters invalid rID's
+        cur.execute('select t.tid, eid1, eid2, ttime, length, t.rid from trip t, maintenance m, Route r where t.tid=m.tid and date(ttime)<>mdate and t.rid=r.rid;')
+        # print(f"given time: {time}\n")
+        
+        for row in cur:
+            tid = row[0]
+            eid1 = row[1]
+            eid2 = row[2]
+            truck_time = row[3]
+            length = row[4]
+            rid_prime = row[5]
+            # print(f"truck_time: {truck_time}")
+            
+            # if a trip has already been scheduled for this rid on the same day
+            if (rid == rid_prime and time.date() == truck_time.date()):
+                return False
+        
+            if (not valid_truck_time(truck_time, time, length)):
+                # invalid time, removing invalid drivers and trucks
+                r_drivers.pop(eid1, None)
+                r_drivers.pop(eid2, None)
+                r_trucks.pop(tid, None)
+                
+
+            # print()
+    
+        # print(r_drivers)
+        # print(r_trucks)
+        # print("\n\n")
+        
+        # if no suitable drivers or trucks
+        if (len(r_drivers) < 2 or len(r_trucks) == 0):
+            return False
+        
+        # picking a facility with matching r_wastetype
+        final_facility = -1
+        cur.execute(f'select fid from facility where wastetype=\'{r_wasteType}\';')
+        for row in cur:
+            final_facility = row[0]
+            break
+        if (final_facility == -1): # edge case: if no suitable facility
+            return False
+        
+        
+        final_eid1 = -1
+        final_eid2 = -1
+        at_least_one_wasteType = False
+        oldest = dt.datetime(9999, 12, 31) # initialzie to date 9999-12-31
+        
+        # for eid1 - always the oldest hire date
+        final_eid1 = min(r_drivers, key=lambda k: r_drivers[k])
+        del r_drivers[final_eid1]
+        
+        # check if this employee can drive the wasteType
+        cur.execute(f'select exists (select * from driver natural join trucktype where eid={final_eid1} and wastetype=\'{r_wasteType}\');')
+        for row in cur:
+            if (row[0] == True):
+                at_least_one_wasteType = True
+
+        if (at_least_one_wasteType):
+            # eid2 just has to be second oldest 
+            final_eid2 = min(r_drivers, key=lambda k: r_drivers[k]) 
+        else:
+            # eid2 has to be the oldest driver that matches the wasteType
+            sorted_drivers = sorted(r_drivers, key=lambda k: r_drivers[k]) # sort the dict into a list based on hiredate 
+            for i in sorted_drivers:
+                cur.execute(f'select exists (select * from driver natural join trucktype where eid={i} and wastetype=\'{r_wasteType}\');')
+                for row in cur:
+                    if (row[0] == True):
+                        final_eid2 = i
+                if (final_eid2 != -1):
+                    break
+        
+
+        final_tid = -1
+        final_cap = -1
+        for key, value in r_trucks.items(): # sort by capacity {<tid>: <capacity>}
+            if (value == final_cap): # edge case: prioritize smaller tid #
+                final_tid = min(final_tid, key)
+            elif (value > final_cap):
+                final_cap = value
+                final_tid = key
+
+            
+        cur.execute(f'insert into Trip values ({rid}, {final_tid}, \'{time}\', NULL, {final_eid1}, {final_eid2}, {final_facility});')    
+        return True
+        
+        cur.close()
+            
+        # except pg.Error as ex:
             # You may find it helpful to uncomment this line while debugging,
             # as it will show you all the details of the error that occurred:
             # raise ex
-            return False
+            # pass
+            # return False
 
     def schedule_trips(self, tid: int, date: dt.date) -> int:
         """Schedule the truck identified with <tid> for trips on <date> using
@@ -380,8 +541,8 @@ def test_preliminary() -> None:
     try:
         # TODO: Change the values of the following variables to connect to your
         #  own database:
-        dbname = 'postgres'
-        user = ''
+        dbname = 'csc343h-zhaosh67'
+        user = 'zhaosh67'
         password = ''
 
         connected = ww.connect(dbname, user, password)
