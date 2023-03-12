@@ -440,14 +440,99 @@ class WasteWrangler:
         While a realistic use case will provide a <date> in the near future, our
         tests could use any valid value for <date>.
         """
+        
+        cur = self.connection.cursor()
+        cur.execute('begin;')
+        cur.execute('savepoint sp_schedule_maintenance;')
+
         try:
-            # TODO: implement this method
-            pass
+            before_date = date - dt.timedelta(days=90)
+            after_date = date + dt.timedelta(days=10)
+            one_plus_date = date + dt.timedelta(days=1)
+            all_trucks = {} # {<tid>: <truckType>}, can use dict b/c key, value is unique
+
+            # lists all tids that have not had a maintenance AND a trip on one_plus_date
+            cur.execute(f'create temp view RecentMaintenance as(select tid from maintenance where mdate>=\'{before_date}\' and mdate<=\'{after_date}\');')
+            cur.execute(f'create temp view TripOnDay as(select tid from trip where date(ttime)=\'{one_plus_date}\');')
+            cur.execute('create temp view NoMaintenance as((select tid from truck except select tid from RecentMaintenance)except select tid from TripOnDay);')
+            cur.execute('select tid, trucktype from NoMaintenance natural join truck order by tid;')
+            for row in cur:
+                all_trucks[row[0]] = row[1]
+                
+            if (len(all_trucks) == 0): # edge case: no trucks need maintenance
+                cur.close()
+                return 0
+            
+            # print(all_trucks) # debug
+
+            # task: need to find all available techs one day = 1+date that can maintain the trucks in all_trucks
+            # note: one tech can maintain multiple trucks on the same day
+            # also, a tech can only handle one truckType
+            # Use "natural LEFT join" b/c could exist a tech that has never had a maintance record yet
+            all_techs = [] # [<eid>, <trucktype>, <availability>]
+            final_list = [] # [<tid>, <eid>, <date>]
+            tech_availability = {} # {<eid>: <availability>}
+
+            # obtain all available technicains 
+            cur.execute(f'create temp view UnavailableTechs as(select eid from maintenance where mdate=\'{one_plus_date}\');')
+            cur.execute('create temp view AvailableTechs as (select eid from technician except select eid from UnavailableTechs);')
+            cur.execute('select distinct eid, trucktype from AvailableTechs natural left join technician order by eid;')
+            for row in cur:
+                all_techs.append([row[0], row[1], one_plus_date])
+                tech_availability[row[0]] = one_plus_date
+            
+            # match available techs with trucks
+            # - a tech can only handel one truck per day
+            # -- if no techs available that day, schedule for next day
+            for tid, trucktype in all_trucks.items():
+
+                current_date = one_plus_date
+                need_to_schedule = True
+                match_possible = False
+                while (need_to_schedule):
+                
+                    count_techs = 0
+                    for techs in all_techs: # [<eid>, <trucktype>, <availability>]
+                        if (trucktype == techs[1]): # if trucktype matches (need this b/c maybe there's no tech available whatsoever)
+                            match_possible = True
+                            
+                            # if (current_date == techs[2]): # if tech is available on current_date
+                            if (current_date == tech_availability[techs[0]]): # if tech is available on current_date
+                                final_list.append([tid, techs[0], current_date])
+                                need_to_schedule = False
+                                
+                                # need to update availability for every tech instances of trucktype
+                                # techs[2] = techs[2] + dt.timedelta(days=1) # update availability for tech
+                                tech_availability[techs[0]] = tech_availability[techs[0]] + dt.timedelta(days=1) # update availability for tech
+                                break
+                            
+                        count_techs += 1
+                                
+                    # print(f"current date: {current_date}")
+                    if (not match_possible): # if no techs available for truck, we skip this truck
+                        break 
+                    elif (count_techs == len(all_techs)): # match might still be possible, but no techs available on current_date
+                        current_date = current_date + dt.timedelta(days=1)
+                                
+                        
+            # insert into maintenance table
+            # Maintenance(tid, eid, date)
+            for row in final_list:
+                cur.execute(f'insert into maintenance values ({row[0]}, {row[1]}, \'{row[2]}\');')
+                
+            # print(final_list) # debug
+
+            cur.execute('commit;')
+            cur.close()
+            return len(final_list) 
+            
         except pg.Error as ex:
             # You may find it helpful to uncomment this line while debugging,
             # as it will show you all the details of the error that occurred:
-            # raise ex
-            return 0
+            cur.execute('rollback to sp_schedule_maintenance;')
+            cur.close()
+            raise ex
+            # return 0
 
     def reroute_waste(self, fid: int, date: dt.date) -> int:
         """Reroute the trips to <fid> on day <date> to another facility that
