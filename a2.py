@@ -199,8 +199,6 @@ class WasteWrangler:
             cur.execute(f'select wastetype from Route where rid={rid};')
             for row in cur:
                 r_wasteType = row[0]
-            # print(r_wasteType)
-        
             
             r_drivers = {} # {<eid>: <hiredate>}
             r_trucks = {} # {<tid>: <capacity>}
@@ -215,15 +213,9 @@ class WasteWrangler:
             for row in cur:
                 r_trucks[row[0]] = int(row[1])
 
-            # print(r_drivers)
-            # print(r_trucks)
-
-
             # Trying to filter out any trucks OR drivers that are busy (i.e. scheduled on a trip during the same time as the given time)
             # filters out trucks that are scheduled for maintenance on the same day, matched with their routes, and filters invalid rID's
             cur.execute('select t.tid, eid1, eid2, ttime, length, t.rid from trip t, maintenance m, Route r where t.tid=m.tid and date(ttime)<>mdate and t.rid=r.rid;')
-            # print(f"given time: {time}\n")
-            
             for row in cur:
                 tid = row[0]
                 eid1 = row[1]
@@ -231,10 +223,10 @@ class WasteWrangler:
                 truck_time = row[3]
                 length = row[4]
                 rid_prime = row[5]
-                # print(f"truck_time: {truck_time}")
                 
                 # if a trip has already been scheduled for this rid on the same day
                 if (rid == rid_prime and time.date() == truck_time.date()):
+                    cur.close()
                     return False
             
                 # print(f"truck time: {truck_time}, given_time: {time}")
@@ -245,12 +237,6 @@ class WasteWrangler:
                     r_trucks.pop(tid, None)
                     
 
-                # print()
-        
-            # print(r_drivers)
-            # print(r_trucks)
-            # print("\n\n")
-            
             # if no suitable drivers or trucks
             if (len(r_drivers) < 2 or len(r_trucks) == 0):
                 return False
@@ -262,13 +248,12 @@ class WasteWrangler:
                 final_facility = row[0]
                 break
             if (final_facility == -1): # edge case: if no suitable facility
+                cur.close()
                 return False
-            
             
             final_eid1 = -1
             final_eid2 = -1
-            at_least_one_wasteType = False
-            oldest = dt.datetime(9999, 12, 31) # initialzie to date 9999-12-31
+            # oldest = dt.datetime(9999, 12, 31) # initialzie to date 9999-12-31
             
             # for eid1 - always the oldest hire date
             final_eid1 = min(r_drivers, key=lambda k: r_drivers[k])
@@ -307,7 +292,6 @@ class WasteWrangler:
                 
             cur.execute(f'insert into Trip values ({rid}, {final_tid}, \'{time}\', NULL, {final_eid1}, {final_eid2}, {final_facility});')    
             cur.execute('commit;')
-
             cur.close()
             return True
             
@@ -317,11 +301,8 @@ class WasteWrangler:
             cur.execute('rollback to sp_schedule_trip;')
             cur.close()
             raise ex
-            # pass
             # return False
         
-            
-
     def schedule_trips(self, tid: int, date: dt.date) -> int:
         """Schedule the truck identified with <tid> for trips on <date> using
         the following approach:
@@ -380,14 +361,99 @@ class WasteWrangler:
         Hint: We have provided a helper _read_qualifications_file that you
             might find helpful for completing this method.
         """
+        # If the given eID is not in employee or if the given eID belongs to a driver, then it's considered an invalid entry. 
+        cur = self.connection.cursor()
+        cur.execute('begin;')
+        cur.execute('savepoint sp_update_technicians;')
+        
         try:
-            # TODO: implement this method
-            pass
+            # reading and parsing text file
+            master_list = self._read_qualifications_file(qualifications_file) # [[<first>, <surname>, <trucktype]]
+            # print(master_list) # debug
+
+            # obtain all VALID employees (no drivers allowed)
+            valid_employees = {} # {<full name>: <eid>}
+            cur.execute('create temp view NonDrivers as(select eid from employee except select eid from driver);')
+            cur.execute('select name, eid from NonDrivers natural join employee;')
+            for row in cur:
+                valid_employees[row[0]] = row[1]
+            
+            # obtain all trucktypes
+            all_trucktypes = []
+            cur.execute('select distinct trucktype from trucktype;')
+            for row in cur:
+                all_trucktypes.append(row[0])
+                
+            # link all technicians with their trucktype(s)
+            all_techs = {} # {<eid>: [<trucktype1>, <trucktype2>, ...]}
+            temp_list = []
+            first_time = True
+            head_eid = 0
+            cur.execute('select eid, trucktype from technician;')
+            for row in cur:
+                # print(f"eid: {row[0]}, trucktype: {row[1]}")
+                current_eid = row[0]
+                if (first_time):
+                    head_eid = current_eid
+                    first_time = False
+                
+                if (current_eid != head_eid):
+                    # we've moved onto the next employee
+                    all_techs[head_eid] = temp_list
+                    temp_list = []
+                    head_eid = current_eid
+                
+                temp_list.append(row[1]) # appending trucktype
+            all_techs[head_eid] = temp_list # for last eid
+            
+            # print(all_techs)
+            count = 0
+            prev_inserts = [] # [[<eid>, <trucktype>]], list that holds duplicate entries
+                        
+            # cycle through the master list of all the names
+            for entry in master_list: # [[<first>, <last>, <trucktype>]]
+                # check if employee exists
+                # print(entry[0]+" "+entry[1])
+                if (valid_employees.get(entry[0]+" "+entry[1]) is None): # checks if the name is in the employee list
+                    continue # employee name DNE, gg go next
+    
+                # valid eid exists!
+                eid = valid_employees.get(entry[0]+" "+entry[1])
+            
+                # check if it's a valid truck type
+                if (entry[2] not in all_trucktypes):
+                    continue
+
+                # check if this employee is not recorded as a technician yet
+                if (all_techs.get(eid) is None): 
+                    count += 1
+                    cur.execute(f'insert into Technician values ({eid}, \'{entry[2]}\');')
+                
+                else: 
+                    # check what trucktypes this technician can already work with
+                    if (entry[2] not in all_techs.get(eid)): # entry[2] is the trucktype
+                        # only insert if trucktype being inserted is new
+
+                        for sublist in prev_inserts: # edge case: inserting duplicates since the table hasn't registered yet
+                            # check if there ISN'T a duplicate entry
+                            if (not (eid == sublist[0] and entry[2] == sublist[1])): 
+                                count += 1 
+                                cur.execute(f'insert into Technician values ({eid}, \'{entry[2]}\');')
+                                break
+                            
+                        prev_inserts.append([eid, entry[2]])
+                        
+            cur.execute('commit;')
+            cur.close()
+            return count
+
         except pg.Error as ex:
             # You may find it helpful to uncomment this line while debugging,
             # as it will show you all the details of the error that occurred:
-            # raise ex
-            return 0
+            cur.execute('rollback to sp_update_technicians;')
+            cur.close()
+            raise ex
+            # return 0
 
     def workmate_sphere(self, eid: int) -> list[int]:
         """Return the workmate sphere of the driver identified by <eid>, as a
@@ -440,7 +506,7 @@ class WasteWrangler:
         While a realistic use case will provide a <date> in the near future, our
         tests could use any valid value for <date>.
         """
-        
+
         cur = self.connection.cursor()
         cur.execute('begin;')
         cur.execute('savepoint sp_schedule_maintenance;')
@@ -671,6 +737,7 @@ def test_preliminary() -> None:
         assert not scheduled_trip, \
             f"[Schedule Trip] Expected False, Got {scheduled_trip}"
 
+        # """
         # -------------------- Testing schedule_trips  ------------------------#
 
         # All routes for truck tid are scheduled on that day
@@ -678,6 +745,7 @@ def test_preliminary() -> None:
         assert scheduled_trips == 0, \
             f"[Schedule Trips] Expected 0, Got {scheduled_trips}"
 
+        # """
         # ----------------- Testing update_technicians  -----------------------#
 
         # This uses the provided file. We recommend you make up your custom
