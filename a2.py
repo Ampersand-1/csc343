@@ -304,39 +304,94 @@ class WasteWrangler:
             # return False
         
     def schedule_trips(self, tid: int, date: dt.date) -> int:
-        """Schedule the truck identified with <tid> for trips on <date> using
-        the following approach:
-
-            1. Find routes not already scheduled for <date>, for which <tid>
-               is able to carry the waste type. Schedule these by ascending
-               order of rIDs.
-
-            2. Starting from 8 a.m., find the earliest available pair
-               of drivers who are available all day. Give preference
-               based on hireDate (employees who have the most
-               experience get priority), and break ties by choosing
-               the lower eID, such that at least one employee can
-               drive the truck type of <tid>.
-
-               The facility for the trip is the one with the lowest fID that can
-               handle the waste type of the route.
-
-               The volume for the scheduled trip should be null.
-
-            3. Continue scheduling, making sure to leave 30 minutes between
-               the end of one trip and the start of the next, using the
-               assumption that <tid> will travel an average of 5 kph.
-               Make sure that the last trip will not end after 4 p.m.
-
-        Return the number of trips that were scheduled successfully.
-
-        Your method should NOT raise an error.
-
-        While a realistic use case will provide a <date> in the near future, our
-        tests could use any valid value for <date>.
-        """
         # TODO: implement this method
-        pass
+        cursor = self.connection.cursor()
+        cursor.execute('begin;')
+        cursor.execute('savepoint sp_schedule_trips;')
+        
+        try:
+            # TODO: implement this method
+            #cursor.execute("SELECT DISTINCT wasteType from TruckType, Truck where Truck.TruckType=TruckType.TruckType;", (tid,))
+            #carryWaste = cursor.fetchall()
+            #print(carryWaste)
+            cursor.execute("SELECT TruckType from Truck where tid = %s;", (tid,))
+            tT = cursor.fetchone()[0]
+            dayOne = dt.datetime.combine(date, dt.datetime.min.time())
+            dayTwo = dt.datetime.combine(date+ dt.timedelta(days=1), dt.datetime.min.time())
+            cursor.execute("SELECT DISTINCT eid1 as eid FROM Trip where tTIME > %s and tTime < %s "
+                           "UNION "
+                           "SELECT DISTINCT eid2 as eid FROM Trip where tTIME > %s and tTime < %s;", (dayOne,dayTwo,dayOne,dayTwo,))
+            Disqualified = cursor.fetchall()
+            dis = []
+            for item in Disqualified:
+                dis.append(item[0])
+
+            cursor.execute("SELECT DISTINCT eID from Driver "
+                           " where TruckType=%s "
+                            "ORDER BY eid ASC;", (tT,))
+            firstDriver = cursor.fetchall()
+            i = 0
+            while(True):
+                if(firstDriver[i][0] is not None):
+                    if(firstDriver[i][0] not in Disqualified):
+                        firstD = firstDriver[i][0]
+                        break
+                    i += 1
+                else:
+                    return 0
+            if(len(firstDriver) == 0):
+                return 0
+            firstD = firstDriver[0][0]
+            
+
+            cursor.execute("SELECT DISTINCT eID from Driver"
+                           " ORDER BY eid ASC;")
+            secDriver = cursor.fetchall()
+            i = 0
+            while(True):
+                if(secDriver[i][0] is not None):
+                    secD = secDriver[i][0]
+                    if((secD != firstD) and (secD not in Disqualified)):
+                        break
+                    i+= 1
+                else:
+                    return 0
+
+            cursor.execute("Select distinct rID from Route where "
+                           " Route.WasteType in (Select DISTINCT TruckType.WasteType from TruckType where TruckType.TruckType = %s) and "
+                            " rID not in (SELECT DISTINCT rID FROM Trip where tTime > %s and tTime < %s)", (tT,dayOne,dayTwo,))
+            notTrip = cursor.fetchall()
+            yesnt = True
+            tripped = 0
+            givenTime = dt.datetime.combine(date, dt.time(hour=0, minute=0, second=0))
+            givenTime = givenTime + dt.timedelta(hours=8)
+            
+            while(yesnt and (tripped < len(notTrip))):
+                cursor.execute("Select WasteType from Route where rID = %s;", (notTrip[tripped],))
+                WasteID = cursor.fetchone()
+                cursor.execute("Select fID from Facility where wasteType = %s order by fID ASC;", (WasteID,))
+                fID = cursor.fetchone()
+                cursor.execute("Select length from Route where rID = %s;", (notTrip[tripped],))
+                length = cursor.fetchone()
+                projectTime = givenTime + dt.timedelta(hours=(length[0]/5))
+                if(projectTime.time() <=  dt.time(15, 30)):
+                    if(firstD > secD):
+                        cursor.execute('INSERT INTO Trip (rID, tID, tTIME, volume, eID1, eID2, fID) VALUES (%s, %s, %s, %s, %s, %s, %s)', (notTrip[tripped], tid, givenTime, None, firstD, secD, fID))    
+                    else:
+                        cursor.execute('INSERT INTO Trip (rID, tID, tTIME, volume, eID1, eID2, fID) VALUES (%s, %s, %s, %s, %s, %s, %s)', (notTrip[tripped], tid, givenTime, None, secD, firstD, fID))
+                    cursor.execute('commit;')
+                    givenTime = projectTime
+                    tripped += 1
+                else:
+                    yesnt = False
+                        
+            return tripped
+
+            
+        except pg.Error as ex:
+            cur.execute('rollback to sp_schedule_trips;')
+            cur.close()
+            return 0
 
     def update_technicians(self, qualifications_file: TextIO) -> int:
         """Given the open file <qualifications_file> that follows the format
@@ -472,13 +527,39 @@ class WasteWrangler:
         Your method should NOT return an error. If an error occurs, your method
         should simply return an empty list.
         """
+        # conn = pg.connect("dbname=csc343h-zhaoluji user=zhaoluji password=")
+        # cursor = conn.cursor()
+        # cur.execute('set search_path to waste_wrangler;')
+        cur = self.connection.cursor()
+        cur.execute('begin;')
+        cur.execute('savepoint WorkSphere_Reset;')
         try:
             # TODO: implement this method
-            pass
+            # Assume Those worksphere doesn't consider time        
+            cur.execute("SELECT DISTINCT eid1 as eid FROM Trip where eid2 = %s UNION SELECT DISTINCT eid2 as eid FROM Trip where eid1 = %s;", (eid,eid,))
+            unprocessed = cur.fetchall()
+            if(len(unprocessed)==0):
+                return []
+            
+            processed = []
+            placeHolder = []
+            newEid = 0;
+            while(unprocessed):
+                 newEid = unprocessed[0]
+                 #print(newEid)
+                 unprocessed.pop(0)
+                 if(newEid[0] not in processed and newEid[0] != eid):
+                     processed.append(newEid[0])
+                     cur.execute("SELECT DISTINCT eid1 as eid FROM Trip where eid2 = %s UNION SELECT DISTINCT eid2 as eid FROM Trip where eid1 = %s;", (newEid,newEid,))
+                     placeHolder = cur.fetchall()
+                     unprocessed.extend(placeHolder)
+
+            return processed
+            
         except pg.Error as ex:
-            # You may find it helpful to uncomment this line while debugging,
-            # as it will show you all the details of the error that occurred:
-            # raise ex
+            cur.execute('rollback to WorkSphere_Reset;')
+            cur.close()
+            raise ex
             return []
 
     def schedule_maintenance(self, date: dt.date) -> int:
@@ -618,14 +699,39 @@ class WasteWrangler:
 
         Assume this happens before any of the trips have reached <fid>.
         """
+        
+        
+        cur = self.connection.cursor()
+        cur.execute('begin;')
+        cur.execute('savepoint reroute_waste;')
         try:
-            # TODO: implement this method
-            pass
+            cur.execute("SELECT wasteType from Facility where fid = %s;", (fid,))
+            row = cur.fetchone()
+            sameWasteType = row[0]
+            cur.execute("SELECT fid from Facility where wasteType = %s and fid <> %s order by fid ASC;", (sameWasteType,fid,))
+            replaceFid = cur.fetchone()[0]
+            cur.execute("Select tID from Trip where fid = %s and tTIME > %s;", (fid ,date,))
+            newRow = cur.fetchall()
+            if len(newRow)==0:
+                return 0
+            cur.execute("Update Trip Set fid = %s where fid = %s and tTIME > %s and tTime < %s;", (replaceFid, fid ,date, date+dt.timedelta(days=1),))
+            cur.execute('commit;')
+
+            cur.close()
+            return True
+
         except pg.Error as ex:
             # You may find it helpful to uncomment this line while debugging,
             # as it will show you all the details of the error that occurred:
             # raise ex
-            return 0
+            cur.execute('rollback to reroute_waste;')
+            cur.close()
+            raise ex
+            return False
+        
+        
+        
+        
 
     # =========================== Helper methods ============================= #
 
@@ -700,8 +806,8 @@ def test_preliminary() -> None:
     try:
         # TODO: Change the values of the following variables to connect to your
         #  own database:
-        dbname = 'csc343h-zhaosh67'
-        user = 'zhaosh67'
+        dbname = 'csc343h-zhaoluji'
+        user = 'zhaoluji'
         password = ''
 
         connected = ww.connect(dbname, user, password)
